@@ -1,0 +1,24 @@
+{
+  "name": "scraper-comercios-caba",
+  "version": "1.0.0",
+  "description": "Scraper de comercios en CP 1430 - CABA (Buenos Aires)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "scrape": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "@seald-io/nedb": "^4.1.2",
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "dotenv": "^16.0.0",
+    "mongoose": "^8.0.0",
+    "p-limit": "^3.1.0",
+    "puppeteer": "^21.0.0",
+    "user-agents": "^1.0.1388"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  }
+}
