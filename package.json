@@ -9,12 +9,13 @@
     "dev": "nodemon src/index.js"
   },
   "dependencies": {
+    "@seald-io/nedb": "^4.1.2",
     "axios": "^1.6.0",
     "cheerio": "^1.0.0-rc.12",
-    "mongoose": "^8.0.0",
-    "puppeteer": "^21.0.0",
-    "p-limit": "^3.1.0",
     "dotenv": "^16.0.0",
+    "mongoose": "^8.0.0",
+    "p-limit": "^3.1.0",
+    "puppeteer": "^21.0.0",
     "user-agents": "^1.0.1388"
   },
   "devDependencies": {

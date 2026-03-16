@@ -1,19 +1,25 @@
-const mongoose = require('mongoose');
+const Datastore = require('@seald-io/nedb');
+const path = require('path');
+const fs = require('fs');
+
+const DB_DIR = path.join(__dirname, '..', '..', 'data');
+if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Datastore({
+  filename: path.join(DB_DIR, 'comercios.db'),
+  autoload: true,
+});
+
+// Índice único por nombre+dirección
+db.ensureIndex({ fieldName: 'nombre' });
 
 async function conectar() {
-  const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/comercios_caba';
-  try {
-    await mongoose.connect(uri);
-    console.log(`✅ MongoDB conectado: ${uri}`);
-  } catch (err) {
-    console.error('❌ Error conectando a MongoDB:', err.message);
-    throw err;
-  }
+  console.log(`✅ NeDB listo en: ${path.join(DB_DIR, 'comercios.db')}`);
 }
 
 async function desconectar() {
-  await mongoose.disconnect();
-  console.log('🔌 MongoDB desconectado');
+  // NeDB no requiere desconexión
+  console.log('🔌 NeDB cerrado');
 }
 
-module.exports = { conectar, desconectar };
+module.exports = { db, conectar, desconectar };

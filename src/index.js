@@ -1,75 +1,79 @@
 require('dotenv').config();
-const { conectar, desconectar } = require('./utils/db');
-const Comercio = require('./models/Comercio');
+const { db, conectar, desconectar } = require('./utils/db');
 const { sleep } = require('./utils/helpers');
 const fs = require('fs');
 const path = require('path');
 
-// Scrapers disponibles
 const scraperGuiaLocales = require('./scrapers/guiaLocales');
 const scraperPaginasAmarillas = require('./scrapers/paginasAmarillas');
-const scraperGoogleMaps = require('./scrapers/googleMaps');
 
 const POSTAL_CODE = process.env.POSTAL_CODE || '1430';
 
-async function guardarComercio(datos) {
-  if (!datos.nombre) return null;
+// ─── Promisify NeDB ────────────────────────────────────────────────────────────
+function dbFind(query) {
+  return new Promise((res, rej) => db.find(query, (e, d) => e ? rej(e) : res(d)));
+}
+function dbCount(query) {
+  return new Promise((res, rej) => db.count(query, (e, d) => e ? rej(e) : res(d)));
+}
+function dbUpsert(doc) {
+  return new Promise((res, rej) => {
+    const clave = { nombre: doc.nombre, codigoPostal: doc.codigoPostal };
+    db.findOne(clave, (err, existente) => {
+      if (err) return rej(err);
+      if (existente) {
+        // Merge arrays sin duplicar
+        const emailSet = new Set([...(existente.email || []), ...(doc.email || [])]);
+        const telSet = new Set([...(existente.telefono || []), ...(doc.telefono || [])]);
+        const waSet = new Set([...(existente.whatsapp || []), ...(doc.whatsapp || [])]);
+        const redes = { ...(existente.redesSociales || {}), ...(doc.redesSociales || {}) };
 
-  try {
-    const resultado = await Comercio.findOneAndUpdate(
-      { nombre: datos.nombre, direccion: datos.direccion || null },
-      {
-        $setOnInsert: { scrapedAt: new Date() },
-        $set: {
-          rubro: datos.rubro || null,
-          web: datos.web || null,
-          fuente: datos.fuente,
-          urlFuente: datos.urlFuente,
-          codigoPostal: datos.codigoPostal || POSTAL_CODE,
-          barrio: datos.barrio || null,
-        },
-        $addToSet: {
-          email: { $each: datos.email || [] },
-          telefono: { $each: datos.telefono || [] },
-          whatsapp: { $each: datos.whatsapp || [] },
-        },
-        $set: {
-          'redesSociales.facebook': datos.redesSociales?.facebook || undefined,
-          'redesSociales.instagram': datos.redesSociales?.instagram || undefined,
-          'redesSociales.twitter': datos.redesSociales?.twitter || undefined,
-          'redesSociales.linkedin': datos.redesSociales?.linkedin || undefined,
-          'redesSociales.youtube': datos.redesSociales?.youtube || undefined,
-          'redesSociales.tiktok': datos.redesSociales?.tiktok || undefined,
-        },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-    return resultado;
-  } catch (err) {
-    if (err.code === 11000) {
-      // Duplicado — ok, ignorar
-      return null;
-    }
-    console.error(`  ❌ Error guardando "${datos.nombre}": ${err.message}`);
-    return null;
-  }
+        db.update(
+          { _id: existente._id },
+          {
+            $set: {
+              email: [...emailSet],
+              telefono: [...telSet],
+              whatsapp: [...waSet],
+              redesSociales: redes,
+              rubro: doc.rubro || existente.rubro,
+              web: doc.web || existente.web,
+              direccion: doc.direccion || existente.direccion,
+              updatedAt: new Date(),
+            },
+          },
+          {},
+          (e) => e ? rej(e) : res('updated')
+        );
+      } else {
+        db.insert({ ...doc, createdAt: new Date(), updatedAt: new Date() },
+          (e, d) => e ? rej(e) : res('inserted'));
+      }
+    });
+  });
 }
 
 async function guardarLote(comercios) {
   let guardados = 0;
-  let saltados = 0;
+  let actualizados = 0;
   for (const c of comercios) {
-    const res = await guardarComercio(c);
-    if (res) guardados++;
-    else saltados++;
+    if (!c.nombre) continue;
+    try {
+      const res = await dbUpsert(c);
+      if (res === 'inserted') guardados++;
+      else actualizados++;
+    } catch (err) {
+      console.error(`  ❌ Error "${c.nombre}": ${err.message}`);
+    }
   }
-  return { guardados, saltados };
+  return { guardados, actualizados };
 }
 
-async function exportarJSON(todos) {
+async function exportarJSON() {
   const dir = path.join(__dirname, '..', 'results');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
+  const todos = await dbFind({ codigoPostal: POSTAL_CODE });
   const archivo = path.join(dir, `comercios_1430_${Date.now()}.json`);
   fs.writeFileSync(archivo, JSON.stringify(todos, null, 2), 'utf-8');
   console.log(`\n💾 Exportado a: ${archivo}`);
@@ -81,90 +85,63 @@ async function main() {
   console.log('  SCRAPER DE COMERCIOS - CP 1430 - CABA (Buenos Aires)');
   console.log('═══════════════════════════════════════════════════════\n');
 
-  // Conectar a MongoDB
   await conectar();
 
-  const todosLosComerciosGuardados = [];
   const errores = [];
 
-  // ── 1. OpenStreetMap + GuiaLocales + DondeVivimos (sin navegador) ──
-  console.log('📦 [1/3] Fuentes con datos abiertos y Axios...');
+  // ── 1. OpenStreetMap + GuiaLocales + DondeVivimos ──────────────────────────
+  console.log('📦 [1/2] Fuentes Axios (OpenStreetMap, GuiaLocales, DondeVivimos)...');
   try {
-    const comerciosGuia = await scraperGuiaLocales.scrape();
-    console.log(`  → ${comerciosGuia.length} comercios encontrados`);
-    const { guardados, saltados } = await guardarLote(comerciosGuia);
-    todosLosComerciosGuardados.push(...comerciosGuia);
-    console.log(`  ✅ Guardados: ${guardados} | Saltados (dup): ${saltados}`);
+    const comercios = await scraperGuiaLocales.scrape();
+    console.log(`  → ${comercios.length} comercios encontrados`);
+    const { guardados, actualizados } = await guardarLote(comercios);
+    console.log(`  ✅ Nuevos: ${guardados} | Actualizados: ${actualizados}`);
   } catch (err) {
-    console.error(`  ❌ Error en GuiaLocales: ${err.message}`);
-    errores.push({ fuente: 'GuiaLocales', error: err.message });
+    console.error(`  ❌ Error: ${err.message}`);
+    errores.push({ fuente: 'GuiaLocales/OSM', error: err.message });
   }
 
-  await sleep(2000);
+  await sleep(1000);
 
-  // ── 2. Páginas Amarillas (Puppeteer) ──
-  console.log('\n📦 [2/3] Páginas Amarillas...');
+  // ── 2. Páginas Amarillas ────────────────────────────────────────────────────
+  console.log('\n📦 [2/2] Páginas Amarillas (Puppeteer)...');
   try {
-    const comerciosPAm = await scraperPaginasAmarillas.scrape({ maxPaginas: 3 });
-    console.log(`  → ${comerciosPAm.length} comercios encontrados`);
-    const { guardados, saltados } = await guardarLote(comerciosPAm);
-    todosLosComerciosGuardados.push(...comerciosPAm);
-    console.log(`  ✅ Guardados: ${guardados} | Saltados (dup): ${saltados}`);
+    const comercios = await scraperPaginasAmarillas.scrape({ maxPaginas: 3 });
+    console.log(`  → ${comercios.length} comercios encontrados`);
+    const { guardados, actualizados } = await guardarLote(comercios);
+    console.log(`  ✅ Nuevos: ${guardados} | Actualizados: ${actualizados}`);
   } catch (err) {
-    console.error(`  ❌ Error en Páginas Amarillas: ${err.message}`);
+    console.error(`  ❌ Error: ${err.message}`);
     errores.push({ fuente: 'PaginasAmarillas', error: err.message });
   }
 
-  await sleep(2000);
+  // ── Resumen ────────────────────────────────────────────────────────────────
+  const totalEnDB = await dbCount({ codigoPostal: POSTAL_CODE });
+  const todos = await dbFind({ codigoPostal: POSTAL_CODE });
 
-  // ── 3. Google Maps (Puppeteer) ──
-  console.log('\n📦 [3/3] Google Maps...');
-  try {
-    const comerciosMaps = await scraperGoogleMaps.scrape();
-    console.log(`  → ${comerciosMaps.length} comercios encontrados`);
-    const { guardados, saltados } = await guardarLote(comerciosMaps);
-    todosLosComerciosGuardados.push(...comerciosMaps);
-    console.log(`  ✅ Guardados: ${guardados} | Saltados (dup): ${saltados}`);
-  } catch (err) {
-    console.error(`  ❌ Error en Google Maps: ${err.message}`);
-    errores.push({ fuente: 'GoogleMaps', error: err.message });
-  }
-
-  // ── Resumen final ──
-  const totalEnDB = await Comercio.countDocuments({ codigoPostal: POSTAL_CODE });
+  const conEmail = todos.filter(c => c.email?.length > 0).length;
+  const conWhatsapp = todos.filter(c => c.whatsapp?.length > 0).length;
+  const conTelefono = todos.filter(c => c.telefono?.length > 0).length;
+  const conRedes = todos.filter(c =>
+    c.redesSociales?.facebook || c.redesSociales?.instagram
+  ).length;
 
   console.log('\n═══════════════════════════════════════════════════════');
   console.log('  RESUMEN FINAL');
   console.log('═══════════════════════════════════════════════════════');
-  console.log(`  Total en MongoDB (CP ${POSTAL_CODE}): ${totalEnDB} comercios`);
+  console.log(`  Total en DB (CP ${POSTAL_CODE}): ${totalEnDB} comercios`);
+  console.log('\n  📊 Estadísticas:');
+  console.log(`     Con email:          ${conEmail}`);
+  console.log(`     Con WhatsApp:       ${conWhatsapp}`);
+  console.log(`     Con teléfono:       ${conTelefono}`);
+  console.log(`     Con redes sociales: ${conRedes}`);
   if (errores.length > 0) {
-    console.log(`  ⚠️  Errores en ${errores.length} fuentes:`);
+    console.log(`\n  ⚠️  Errores en ${errores.length} fuente(s):`);
     errores.forEach(e => console.log(`     - ${e.fuente}: ${e.error}`));
   }
-
-  // Exportar resultados a JSON
-  const todos = await Comercio.find({ codigoPostal: POSTAL_CODE }).lean();
-  await exportarJSON(todos);
-
-  // Stats detalladas
-  const conEmail = await Comercio.countDocuments({ codigoPostal: POSTAL_CODE, email: { $ne: [] } });
-  const conWhatsapp = await Comercio.countDocuments({ codigoPostal: POSTAL_CODE, whatsapp: { $ne: [] } });
-  const conTelefono = await Comercio.countDocuments({ codigoPostal: POSTAL_CODE, telefono: { $ne: [] } });
-  const conRedesSociales = await Comercio.countDocuments({
-    codigoPostal: POSTAL_CODE,
-    $or: [
-      { 'redesSociales.facebook': { $ne: null } },
-      { 'redesSociales.instagram': { $ne: null } },
-    ],
-  });
-
-  console.log('\n  📊 Estadísticas de datos:');
-  console.log(`     Con email:         ${conEmail}`);
-  console.log(`     Con WhatsApp:      ${conWhatsapp}`);
-  console.log(`     Con teléfono:      ${conTelefono}`);
-  console.log(`     Con redes sociales: ${conRedesSociales}`);
   console.log('═══════════════════════════════════════════════════════\n');
 
+  await exportarJSON();
   await desconectar();
 }
 
