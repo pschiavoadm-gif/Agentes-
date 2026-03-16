@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  scraper:
+    build: .
+    image: scraper-comercios-caba:latest
+    container_name: scraper-caba
+    restart: unless-stopped
+    environment:
+      - POSTAL_CODE=${POSTAL_CODE:-1430}
+      - DELAY_MS=${DELAY_MS:-2000}
+      - MAX_CONCURRENT=${MAX_CONCURRENT:-3}
+    volumes:
+      # Persistencia de la base de datos NeDB entre reinicios
+      - scraper_data:/app/data
+      # Resultados exportados (JSON/CSV)
+      - scraper_results:/app/results
+    # Necesario para Puppeteer en contenedor
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
+
+volumes:
+  scraper_data:
+  scraper_results:
